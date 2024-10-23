@@ -23,6 +23,7 @@ import (
 
 	"github.com/digitalocean/godo"
 	apiv1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	"k8s.io/autoscaler/cluster-autoscaler/config"
@@ -47,9 +48,9 @@ type NodeGroup struct {
 	clusterID string
 	client    nodeGroupClient
 	nodePool  *godo.KubernetesNodePool
-
-	minSize int
-	maxSize int
+	doClient  *godo.Client
+	minSize   int
+	maxSize   int
 }
 
 // MaxSize returns maximum size of the node group.
@@ -208,7 +209,13 @@ func (n *NodeGroup) Nodes() ([]cloudprovider.Instance, error) {
 // that are started on the node by default, using manifest (most likely only
 // kube-proxy). Implementation optional.
 func (n *NodeGroup) TemplateNodeInfo() (*schedulerframework.NodeInfo, error) {
-	return nil, cloudprovider.ErrNotImplemented
+	node, err := n.BuildNodeFromNodePool(context.TODO())
+	if err != nil {
+		return nil, fmt.Errorf("failed building node object from node pool - %s", err)
+	}
+	nodeInfo := schedulerframework.NewNodeInfo(cloudprovider.BuildKubeProxy(n.id))
+	nodeInfo.SetNode(node)
+	return nodeInfo, nil
 }
 
 // Exist checks if the node group really exists on the cloud provider side.
@@ -241,6 +248,51 @@ func (n *NodeGroup) Autoprovisioned() bool {
 // NodeGroup. Returning a nil will result in using default options.
 func (n *NodeGroup) GetOptions(defaults config.NodeGroupAutoscalingOptions) (*config.NodeGroupAutoscalingOptions, error) {
 	return nil, cloudprovider.ErrNotImplemented
+}
+
+func (n *NodeGroup) BuildNodeFromNodePool(ctx context.Context) (*apiv1.Node, error) {
+	sizes, _, err := n.doClient.Sizes.List(ctx, &godo.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed listing node sizes for node pool: %s - %s", n.nodePool.Name, err)
+	}
+	nodeObj := &apiv1.Node{
+		Spec: apiv1.NodeSpec{
+			ProviderID: "digitalocean://123456789",
+		},
+		Status: apiv1.NodeStatus{
+			Conditions: []apiv1.NodeCondition{
+				{
+					Type:   apiv1.NodeReady,
+					Status: apiv1.ConditionTrue,
+				},
+			},
+		},
+	}
+	for _, size := range sizes {
+		if size.Slug == n.nodePool.Size {
+			cpuQuantity, err := resource.ParseQuantity(fmt.Sprintf("%d", size.Vcpus))
+			if err != nil {
+				return nil, fmt.Errorf("failed parsing slug size CPU quantity - %s", err)
+			}
+			memQuantity, err := resource.ParseQuantity(fmt.Sprintf("%dm", size.Memory))
+			if err != nil {
+				return nil, fmt.Errorf("failed parsing slug size memory quantity - %s", err)
+			}
+			numPods, err := resource.ParseQuantity(fmt.Sprintf("%d", 110))
+			if err != nil {
+				return nil, fmt.Errorf("failed parsing number of pods - %s", err)
+			}
+			capacity := apiv1.ResourceList{
+				"cpu":    cpuQuantity,
+				"memory": memQuantity,
+				"pods":   numPods,
+			}
+
+			nodeObj.Status.Capacity = capacity
+			return nodeObj, nil
+		}
+	}
+	return nil, fmt.Errorf("could not find corresponding droplet size for slug %s", n.nodePool.Size)
 }
 
 // toInstances converts a slice of *godo.KubernetesNode to
