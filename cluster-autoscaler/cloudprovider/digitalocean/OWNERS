@@ -1,9 +1,9 @@
 approvers:
-- andrewsykim
-- MorrisLaw
+- dylanrhysscott
+- gottwald
 reviewers:
-- andrewsykim
-- MorrisLaw
+- dylanrhysscott
+- gottwald
 
 labels:
 - area/provider/digitalocean
